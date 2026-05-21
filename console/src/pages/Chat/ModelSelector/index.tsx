@@ -4,7 +4,8 @@ import { useAppMessage } from "../../../hooks/useAppMessage";
 import {
   CheckOutlined,
   LoadingOutlined,
-  RightOutlined,
+  SearchOutlined,
+  CloseCircleFilled,
 } from "@ant-design/icons";
 import { SparkDownLine } from "@agentscope-ai/icons";
 import { useLocation } from "react-router-dom";
@@ -13,14 +14,14 @@ import { providerApi } from "../../../api/modules/provider";
 import type { ProviderInfo, ActiveModelsInfo } from "../../../api/types";
 import { useAgentStore } from "../../../stores/agentStore";
 import { confirmFreeModelSwitch } from "@/utils/freeModelSwitchWarning";
-import { providerIcon } from "../../Settings/Models/components/providerIcon";
+import { ProviderIcon } from "../../Settings/Models/components/ProviderIconComponent";
 import styles from "./index.module.less";
 
 interface EligibleProvider {
   id: string;
   name: string;
   base_url?: string;
-  models: Array<{ id: string; name: string; is_free?: boolean }>;
+  models: ProviderInfo["models"];
 }
 
 export default function ModelSelector() {
@@ -32,7 +33,9 @@ export default function ModelSelector() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [open, setOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const savingRef = useRef(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const location = useLocation();
   const { selectedAgent } = useAgentStore();
   const { message } = useAppMessage();
@@ -98,6 +101,32 @@ export default function ModelSelector() {
       models: [...(p.models ?? []), ...(p.extra_models ?? [])],
     }));
 
+  // Filter providers/models by search query
+  const trimmedSearch = searchQuery.trim();
+  const filteredProviders = (() => {
+    if (!trimmedSearch) return eligibleProviders;
+    const query = trimmedSearch.toLowerCase();
+    return eligibleProviders
+      .map((p) => ({
+        ...p,
+        models: p.models.filter(
+          (m) =>
+            (m.name || m.id).toLowerCase().includes(query) ||
+            p.name.toLowerCase().includes(query),
+        ),
+      }))
+      .filter((p) => p.models.length > 0);
+  })();
+
+  // Focus search input when dropdown opens; clear query when closes
+  useEffect(() => {
+    if (open) {
+      setTimeout(() => searchInputRef.current?.focus(), 50);
+    } else {
+      setSearchQuery("");
+    }
+  }, [open]);
+
   const activeProviderId = activeModels?.active_llm?.provider_id;
   const activeModelId = activeModels?.active_llm?.model;
 
@@ -114,9 +143,7 @@ export default function ModelSelector() {
     return activeModelId;
   })();
 
-  const activeProviderIconUrl = activeProviderId
-    ? providerIcon(activeProviderId)
-    : null;
+  const showActiveProviderIcon = Boolean(activeProviderId);
 
   const handleOpenChange = useCallback(
     async (next: boolean) => {
@@ -188,64 +215,85 @@ export default function ModelSelector() {
 
   const dropdownContent = (
     <div className={styles.panel}>
-      {loading ? (
-        <div className={styles.spinWrapper}>
-          <Spin size="small" />
-        </div>
-      ) : eligibleProviders.length === 0 ? (
-        <div className={styles.emptyTip}>
-          {t("modelSelector.noConfiguredModels")}
-        </div>
-      ) : (
-        eligibleProviders.map((provider) => {
-          const isProviderActive = provider.id === activeProviderId;
-          return (
-            <div
-              key={provider.id}
-              className={[
-                styles.providerItem,
-                isProviderActive ? styles.providerItemActive : "",
-              ].join(" ")}
-            >
-              <img
-                src={providerIcon(provider.id)}
-                alt=""
-                className={styles.providerIcon}
-              />
-              <span className={styles.providerName}>{provider.name}</span>
-              <RightOutlined className={styles.providerArrow} />
+      <div className={styles.searchWrapper}>
+        <SearchOutlined className={styles.searchIcon} />
+        <input
+          ref={searchInputRef}
+          className={styles.searchInput}
+          placeholder={t("modelSelector.searchModels")}
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
+        {searchQuery && (
+          <CloseCircleFilled
+            className={styles.searchClear}
+            onClick={(e) => {
+              e.stopPropagation();
+              setSearchQuery("");
+              searchInputRef.current?.focus();
+            }}
+          />
+        )}
+      </div>
 
-              {/* Level-2 submenu — shown on parent hover via CSS */}
-              <div className={`${styles.submenu} modelSubmenu`}>
-                {provider.models.map((model) => {
-                  const isActive =
-                    isProviderActive && model.id === activeModelId;
-                  return (
-                    <div
-                      key={model.id}
-                      className={[
-                        styles.modelItem,
-                        isActive ? styles.modelItemActive : "",
-                      ].join(" ")}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleSelect(provider.id, model.id);
-                      }}
-                    >
-                      <span className={styles.modelName}>
-                        {model.name || model.id}
-                      </span>
+      <div className={styles.listContainer}>
+        {loading ? (
+          <div className={styles.spinWrapper}>
+            <Spin size="small" />
+          </div>
+        ) : filteredProviders.length === 0 ? (
+          <div className={styles.emptyTip}>
+            {trimmedSearch
+              ? t("modelSelector.noModelsFound")
+              : t("modelSelector.noConfiguredModels")}
+          </div>
+        ) : (
+          filteredProviders.map((provider) => (
+            <div key={provider.id} className={styles.providerGroup}>
+              <div className={styles.providerHeader}>
+                <ProviderIcon providerId={provider.id} size={16} />
+                <span className={styles.providerHeaderName}>
+                  {provider.name}
+                </span>
+              </div>
+              {provider.models.map((model) => {
+                const isActive =
+                  provider.id === activeProviderId &&
+                  model.id === activeModelId;
+                return (
+                  <div
+                    key={model.id}
+                    className={[
+                      styles.modelItem,
+                      isActive ? styles.modelItemActive : "",
+                    ].join(" ")}
+                    onClick={() => handleSelect(provider.id, model.id)}
+                  >
+                    <span className={styles.modelName}>
+                      {model.name || model.id}
+                    </span>
+                    <div className={styles.modelTags}>
+                      {model.is_free && (
+                        <span className={styles.freeTag}>
+                          {t("modelSelector.free")}
+                        </span>
+                      )}
+                      {(model.supports_image || model.supports_multimodal) && (
+                        <span className={styles.visionTag}>
+                          {t("modelSelector.vision")}
+                        </span>
+                      )}
                       {isActive && (
                         <CheckOutlined className={styles.checkIcon} />
                       )}
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+                );
+              })}
             </div>
-          );
-        })
-      )}
+          ))
+        )}
+      </div>
     </div>
   );
 
@@ -266,12 +314,8 @@ export default function ModelSelector() {
           {saving && (
             <LoadingOutlined style={{ fontSize: 11, color: "#FF7F16" }} />
           )}
-          {activeProviderIconUrl && (
-            <img
-              src={activeProviderIconUrl}
-              alt=""
-              className={styles.providerIcon}
-            />
+          {showActiveProviderIcon && activeProviderId && (
+            <ProviderIcon providerId={activeProviderId} size={16} />
           )}
           <span className={styles.triggerName}>{activeModelName}</span>
           <SparkDownLine

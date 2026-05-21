@@ -109,6 +109,13 @@ class BaseChannel(ABC):
         """
         return []
 
+    # If True, streaming delta events (reasoning + message) are dispatched
+    # to ``on_streaming_start`` / ``on_streaming_delta`` / ``on_streaming_end``
+    # hooks *in addition to* the existing completed-message path.
+    # Subclasses that support real-time text streaming should set this to True
+    # (either as class attr or via __init__ / from_config).
+    streaming_enabled: bool = False
+
     def __init__(
         self,
         process: ProcessHandler,
@@ -121,12 +128,14 @@ class BaseChannel(ABC):
         allow_from: Optional[list] = None,
         deny_message: str = "",
         require_mention: bool = False,
+        streaming_enabled: bool = False,
     ):
         self._process = process
         self._on_reply_sent = on_reply_sent
         self._show_tool_details = show_tool_details
         self._filter_tool_messages = filter_tool_messages
         self._filter_thinking = filter_thinking
+        self.streaming_enabled = streaming_enabled
         self.dm_policy = dm_policy or "open"
         self.group_policy = group_policy or "open"
         self.allow_from = set(allow_from or [])
@@ -156,12 +165,6 @@ class BaseChannel(ABC):
         self._debounce_seconds: float = 0.0
         self._debounce_pending: Dict[str, List[Any]] = {}
         self._debounce_timers: Dict[str, asyncio.Task[None]] = {}
-        self._tool_stream_buffers: Dict[str, List[str]] = {}
-        self._tool_stream_timers: Dict[str, asyncio.Task[None]] = {}
-        self._tool_stream_targets: Dict[
-            str,
-            tuple[str, str, Optional[Dict[str, Any]]],
-        ] = {}
 
     def _is_native_payload(self, payload: Any) -> bool:
         """True if payload is a native dict that can be time-debounced."""
@@ -466,20 +469,172 @@ class BaseChannel(ABC):
                 f"This should not happen with UnifiedQueueManager.",
             )
 
+    _STREAMABLE_TYPES = {"reasoning", "message"}
+
+    def _resolve_stream_type(self, event: Any) -> str:
+        """Map event.type to a stream_type string.
+
+        Returns ``"reasoning"`` or ``"message"`` for streamable text,
+        or the raw type string (e.g. ``"plugin_call"``) otherwise.
+        """
+        msg_type = getattr(event, "type", None)
+        if msg_type is None:
+            return "message"
+        type_str = (
+            msg_type.value if hasattr(msg_type, "value") else str(msg_type)
+        )
+        return type_str
+
+    async def _dispatch_streaming_event(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        msg_id_to_stream_type: Dict[str, str],
+        streaming_buffers: Dict[str, str],
+    ) -> bool:
+        """Dispatch streaming hooks for reasoning / message events.
+
+        Returns *True* if the event was consumed by the streaming
+        path (so the caller should skip ``on_event_message_completed``).
+        Non-streamable types (e.g. ``plugin_call``) return *False*,
+        falling through to the normal non-streaming path.
+        """
+        obj = getattr(event, "object", None)
+        status = getattr(event, "status", None)
+
+        if obj == "message" and status == RunStatus.InProgress:
+            return await self._on_stream_msg_start(
+                request,
+                to_handle,
+                event,
+                send_meta,
+                msg_id_to_stream_type,
+                streaming_buffers,
+            )
+        if obj == "content" and status == RunStatus.InProgress:
+            return await self._on_stream_content_delta(
+                request,
+                to_handle,
+                event,
+                send_meta,
+                msg_id_to_stream_type,
+                streaming_buffers,
+            )
+        if obj == "message" and status == RunStatus.Completed:
+            return await self._on_stream_msg_end(
+                request,
+                to_handle,
+                event,
+                send_meta,
+                msg_id_to_stream_type,
+                streaming_buffers,
+            )
+        return False
+
+    async def _on_stream_msg_start(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        msg_id_to_stream_type: Dict[str, str],
+        streaming_buffers: Dict[str, str],
+    ) -> bool:
+        stream_type = self._resolve_stream_type(event)
+        if stream_type not in self._STREAMABLE_TYPES:
+            return False
+        msg_id = getattr(event, "id", None)
+        if msg_id:
+            msg_id_to_stream_type[msg_id] = stream_type
+        if stream_type == "reasoning" and self._filter_thinking:
+            return True
+        streaming_buffers[stream_type] = ""
+        await self.on_streaming_start(
+            request,
+            to_handle,
+            event,
+            send_meta,
+            stream_type,
+            accumulated_text="",
+        )
+        return True
+
+    async def _on_stream_content_delta(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        msg_id_to_stream_type: Dict[str, str],
+        streaming_buffers: Dict[str, str],
+    ) -> bool:
+        if not getattr(event, "delta", False):
+            return False
+        content_msg_id = getattr(event, "msg_id", None) or ""
+        stream_type = msg_id_to_stream_type.get(
+            content_msg_id,
+            "",
+        )
+        if not stream_type or stream_type not in self._STREAMABLE_TYPES:
+            return False
+        if stream_type not in streaming_buffers:
+            return False
+        if stream_type == "reasoning" and self._filter_thinking:
+            return True
+        delta_text = getattr(event, "text", "") or ""
+        streaming_buffers[stream_type] = (
+            streaming_buffers.get(stream_type, "") + delta_text
+        )
+        await self.on_streaming_delta(
+            request,
+            to_handle,
+            event,
+            send_meta,
+            stream_type,
+            accumulated_text=streaming_buffers[stream_type],
+        )
+        return True
+
+    async def _on_stream_msg_end(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        msg_id_to_stream_type: Dict[str, str],
+        streaming_buffers: Dict[str, str],
+    ) -> bool:
+        stream_type = self._resolve_stream_type(event)
+        msg_id = getattr(event, "id", None)
+        if msg_id:
+            msg_id_to_stream_type.pop(msg_id, None)
+        if stream_type not in self._STREAMABLE_TYPES:
+            return False
+        if stream_type in streaming_buffers:
+            if stream_type == "reasoning" and self._filter_thinking:
+                streaming_buffers.pop(stream_type, None)
+                return True
+            accumulated = streaming_buffers.pop(stream_type, "")
+            await self.on_streaming_end(
+                request,
+                to_handle,
+                event,
+                send_meta,
+                stream_type,
+                accumulated_text=accumulated,
+            )
+        return True
+
     async def _stream_with_tracker(
         self,
         payload: Any,
     ) -> AsyncGenerator[str, None]:
-        """Stream events through TaskTracker for task tracking.
+        """Stream events via TaskTracker, yielding SSE strings.
 
-        This method wraps _process and yields SSE-formatted events.
-        Called by TaskTracker.attach_or_start to enable task cancellation.
-
-        Args:
-            payload: Message payload (dict or AgentRequest)
-
-        Yields:
-            SSE-formatted event strings
+        When ``streaming_enabled``, streaming hooks are invoked for
+        reasoning / message events alongside the normal path.
         """
         request = self._payload_to_request(payload)
 
@@ -504,21 +659,33 @@ class BaseChannel(ABC):
 
         last_response = None
         process_iterator = None
+        msg_id_to_stream_type: Dict[str, str] = {}
+        streaming_buffers: Dict[str, str] = {}
         try:
             process_iterator = self._process(request)
             async for event in process_iterator:
-                if hasattr(event, "model_dump_json"):
-                    data = event.model_dump_json()
-                elif hasattr(event, "json"):
-                    data = event.json()
-                else:
-                    data = json.dumps({"text": str(event)})
+                data = self._serialize_event_for_sse(event)
 
                 yield f"data: {data}\n\n"
 
                 obj = getattr(event, "object", None)
                 status = getattr(event, "status", None)
 
+                # --- streaming path ---
+                handled_by_streaming = False
+                if self.streaming_enabled:
+                    handled_by_streaming = (
+                        await self._dispatch_streaming_event(
+                            request,
+                            to_handle,
+                            event,
+                            send_meta,
+                            msg_id_to_stream_type,
+                            streaming_buffers,
+                        )
+                    )
+
+                # --- non-streaming / fallback path ---
                 if obj == "content":
                     if await self.on_event_content(
                         request,
@@ -528,12 +695,13 @@ class BaseChannel(ABC):
                     ):
                         continue
                 if obj == "message" and status == RunStatus.Completed:
-                    await self.on_event_message_completed(
-                        request,
-                        to_handle,
-                        event,
-                        send_meta,
-                    )
+                    if not handled_by_streaming:
+                        await self.on_event_message_completed(
+                            request,
+                            to_handle,
+                            event,
+                            send_meta,
+                        )
                 elif obj == "response":
                     last_response = event
                     await self.on_event_response(request, event)
@@ -577,6 +745,73 @@ class BaseChannel(ABC):
                 "Internal error",
             )
             raise
+
+    @staticmethod
+    def _sanitize_surrogate_text(text: str) -> str:
+        try:
+            text.encode("utf-8")
+            return text
+        except UnicodeEncodeError:
+            return text.encode("utf-8", errors="replace").decode(
+                "utf-8",
+                errors="replace",
+            )
+
+    @classmethod
+    def _sanitize_for_json(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return cls._sanitize_surrogate_text(value)
+        if isinstance(value, list):
+            return [cls._sanitize_for_json(v) for v in value]
+        if isinstance(value, dict):
+            out: Dict[Any, Any] = {}
+            for k, v in value.items():
+                nk = (
+                    cls._sanitize_surrogate_text(k)
+                    if isinstance(k, str)
+                    else k
+                )
+                out[nk] = cls._sanitize_for_json(v)
+            return out
+        return value
+
+    def _serialize_event_for_sse(self, event: Any) -> str:
+        try:
+            if hasattr(event, "model_dump_json"):
+                data = event.model_dump_json()
+            elif hasattr(event, "json"):
+                data = event.json()
+            else:
+                data = json.dumps({"text": str(event)}, ensure_ascii=True)
+
+            return self._sanitize_surrogate_text(data)
+
+        except Exception as err:
+            logger.warning(
+                "Event JSON serialization failed; using safe fallback: %s",
+                err,
+            )
+            try:
+                if hasattr(event, "model_dump"):
+                    payload = event.model_dump(mode="python")
+                elif hasattr(event, "dict"):
+                    payload = event.dict()
+                else:
+                    payload = {"text": str(event)}
+
+                payload = self._sanitize_for_json(payload)
+                return json.dumps(payload, ensure_ascii=True, default=str)
+            except Exception as fallback_err:
+                logger.error(
+                    "Fallback event serialization failed: %s",
+                    fallback_err,
+                )
+                return json.dumps(
+                    {
+                        "text": self._sanitize_surrogate_text(str(event)),
+                    },
+                    ensure_ascii=True,
+                )
 
     @classmethod
     def from_env(
@@ -966,11 +1201,71 @@ class BaseChannel(ABC):
         status = getattr(event, "status", None)
         if status != RunStatus.InProgress:
             return False
-        return await self._send_tool_output_content_increment(
+        if self._filter_tool_messages:
+            return False
+        data = getattr(event, "data", None) or {}
+        if not isinstance(data, dict) or "output" not in data:
+            return False
+        body = self._format_stream_tool_output_body(event)
+        if not body:
+            return False
+        await self.send_content_parts(
             to_handle,
-            event,
+            [TextContent(text=body)],
             send_meta,
         )
+        return True
+
+    # ------------------------------------------------------------------
+    # Streaming hooks — override in subclasses
+    # ------------------------------------------------------------------
+
+    async def on_streaming_start(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        stream_type: str,
+        accumulated_text: str = "",
+    ) -> None:
+        """Called when a new streaming segment begins.
+
+        *stream_type* is ``"reasoning"`` or ``"message"``.
+        ``accumulated_text`` is always ``""`` at this point.
+        """
+
+    async def on_streaming_delta(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        stream_type: str,
+        accumulated_text: str = "",
+    ) -> None:
+        """Called for each incremental text chunk.
+
+        ``accumulated_text`` contains all text received so far
+        for this *stream_type*, including the current delta.
+        Useful for channels that overwrite the message bubble
+        with full text on each update (e.g. WeCom).
+        """
+
+    async def on_streaming_end(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        stream_type: str,
+        accumulated_text: str = "",
+    ) -> None:
+        """Called when a streaming segment completes.
+
+        ``accumulated_text`` is the final full text for this
+        *stream_type*.
+        """
 
     async def on_event_message_completed(
         self,
@@ -983,8 +1278,6 @@ class BaseChannel(ABC):
         Hook: one message event completed. Default: send_message_content.
         Override for batch/debounce (e.g. DingTalk merge then send).
         """
-        if getattr(event, "type", None) in _TOOL_OUTPUT_MESSAGE_TYPES:
-            await self._flush_all_stream_tool_buffers(to_handle, send_meta)
         await self.send_message_content(to_handle, event, send_meta)
 
     async def on_event_response(
@@ -1074,107 +1367,55 @@ class BaseChannel(ABC):
         )
         await self.send_content_parts(to_handle, parts, meta)
 
-    async def _send_tool_output_content_increment(
+    def _truncate_stream_tool_chunk(
         self,
-        to_handle: str,
+        text: Any,
+        limit: int = 72,
+    ) -> str:
+        preview = " ".join(str(text or "").split()).strip()
+        if len(preview) > limit:
+            return preview[:limit] + "..."
+        return preview
+
+    def _format_stream_tool_output_body(
+        self,
         event: Any,
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> bool:
+    ) -> Optional[str]:
         data = getattr(event, "data", None) or {}
         if not isinstance(data, dict):
-            return False
+            return None
         output = data.get("output")
         if isinstance(output, str):
             try:
                 output = json.loads(output)
             except json.JSONDecodeError:
-                return False
+                return None
         if not isinstance(output, list):
-            return False
+            return None
 
         tool_name = data.get("name") or "tool"
         chunks: List[str] = []
+        seen_chunks: set[str] = set()
         for block in output:
-            if not isinstance(block, dict) or block.get("type") != "text":
+            if not isinstance(block, dict):
                 continue
-            text = str(block.get("text") or "").strip()
-            if len(text) > 72:
-                text = text[:72] + "..."
-            if text:
-                chunks.append(text)
+            block_type = block.get("type")
+            raw_text = ""
+            if block_type == "text":
+                raw_text = str(block.get("text") or "")
+            elif block_type == "thinking":
+                raw_text = str(block.get("thinking") or "")
+            if not raw_text.strip():
+                continue
+            preview = self._truncate_stream_tool_chunk(raw_text)
+            if not preview or preview in seen_chunks:
+                continue
+            seen_chunks.add(preview)
+            chunks.append(preview)
         if not chunks:
-            return False
-        await self.send_stream_tool(to_handle, tool_name, chunks, meta)
-        return True
-
-    async def _flush_stream_tool_buffer(
-        self,
-        key: str,
-        delay: float = 1,
-    ) -> None:
-        if delay > 0:
-            await asyncio.sleep(delay)
-        chunks = self._tool_stream_buffers.pop(key, [])
-        self._tool_stream_timers.pop(key, None)
-        target = self._tool_stream_targets.pop(key, None)
-        if not chunks or not target:
-            return
-        to_handle, tool_name, meta = target
-        stream_meta = dict(meta or {})
-        stream_meta["is_tool_stream"] = True
-        body = f"⌛️ **{tool_name}**:\n" + "\n".join(
+            return None
+        return f"⌛️ **{tool_name}**:\n" + "\n".join(
             f"`{text}`" for text in chunks
-        )
-        body = body.strip()
-        if not body:
-            return
-        await self.send_content_parts(
-            to_handle,
-            [TextContent(text=body)],
-            stream_meta,
-        )
-
-    async def _flush_all_stream_tool_buffers(
-        self,
-        to_handle: str,
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        session_key = (
-            (meta or {}).get("session_id")
-            or (meta or {}).get("conversation_id")
-            or to_handle
-        )
-        prefix = f"{session_key}:"
-        keys = [
-            key for key in self._tool_stream_buffers if key.startswith(prefix)
-        ]
-        for key in keys:
-            old = self._tool_stream_timers.pop(key, None)
-            if old and not old.done():
-                old.cancel()
-            await self._flush_stream_tool_buffer(key, delay=0)
-
-    async def send_stream_tool(
-        self,
-        to_handle: str,
-        tool_name: str,
-        chunks: List[str],
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        session_key = (
-            (meta or {}).get("session_id")
-            or (meta or {}).get("conversation_id")
-            or to_handle
-        )
-        key = f"{session_key}:{tool_name}"
-        self._tool_stream_targets[key] = (to_handle, tool_name, meta)
-        buffer = self._tool_stream_buffers.setdefault(key, [])
-        buffer.extend(chunks)
-        old = self._tool_stream_timers.pop(key, None)
-        if old and not old.done():
-            old.cancel()
-        self._tool_stream_timers[key] = asyncio.create_task(
-            self._flush_stream_tool_buffer(key, delay=1),
         )
 
     async def send_content_parts(
@@ -1302,6 +1543,23 @@ class BaseChannel(ABC):
                 False,
             ),
         )
+
+    async def health_check(self) -> Dict[str, Any]:
+        """Return health status for this channel.
+
+        Default implementation returns a basic status dict.
+        Subclasses can override to add channel-specific checks
+        (e.g. webhook reachability, token validity, polling status).
+
+        Returns:
+            Dict with at least: channel, status ("healthy" / "unhealthy"),
+            and optional detail, error fields.
+        """
+        return {
+            "channel": self.channel,
+            "status": "healthy",
+            "detail": "Channel is loaded and running.",
+        }
 
     async def start(self) -> None:
         raise NotImplementedError

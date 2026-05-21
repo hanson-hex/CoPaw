@@ -58,15 +58,20 @@
 
 ## ニュース
 
-[2026-04-17] **v1.1.2** をリリースしました！詳細は [v1.1.2 リリースノート](https://qwenpaw.agentscope.io/release-notes) をご覧ください。
+- [2026-05-19] **v1.1.8** をリリースしました！詳細は [v1.1.8 リリースノート](https://qwenpaw.agentscope.io/release-notes) をご覧ください。
 
-- **[v1.1.2] 新機能**：Mission モード（`/mission`）で長時間タスクの自律実行に対応；ACP プロトコルによる外部エージェントへのタスク委任；`qwenpaw doctor` 診断コマンド；`qwenpaw agents create` による CLI エージェント作成；メモリ定期整理（Dream）；新しいデバッグページ。
-- **[v1.1.2] 変更**：エージェント間通信ツールを同期/非同期モードに分離；プロバイダー一覧を利用可能順にソート。
-- **[v1.1.2] 新規コントリビューター**：@FrankJingHao、@ployts、@cqhtyi、@leesf、@flystar32 の皆さん、ありがとうございます。
+  - **[v1.1.8] 新機能**：公式プラグインリソース（Web サイトからダウンロード + コンソールからワンクリックインストール）；QwenPaw Pet デスクトップペット；CloudPaw アリババクラウドデプロイプラグイン；`/make-skill` コマンド；カスタム HTTP ヘッダーと認証モード；モデル別コンテキスト設定；受信トレイ一括操作；チャット履歴ドロワー固定。
+  - **[v1.1.8] セキュリティ**：バックアップ信頼性制御；Skill・AgentMd パストラバーサル防止；プラグイン API 認証。
+  - **[v1.1.8] 修正**：WeCom/WeChat/QQ チャネルの安定性；モデル別レートリミッター；SSE 接続リーク。
+  - **[v1.1.8] 新規コントリビューター**：@Morxi さん、ありがとうございます。
 
-[2026-04-14] v1.1.1 をリリースしました！詳細は [v1.1.1 リリースノート](https://qwenpaw.agentscope.io/release-notes) をご覧ください。
+- [2026-05-14] **v1.1.7** をリリースしました！詳細は [v1.1.7 リリースノート](https://qwenpaw.agentscope.io/release-notes) をご覧ください。
 
-[2026-04-12] **CoPaw は正式に QwenPaw へリブランディングしました**。オープンソース開発の次のフェーズへ進むうえでの、重要な一歩です。
+- [2026-05-09] **v1.1.6** をリリースしました！詳細は [v1.1.6 リリースノート](https://qwenpaw.agentscope.io/release-notes) をご覧ください。
+
+- [2026-04-29] **v1.1.5** をリリースしました！詳細は [v1.1.5 リリースノート](https://qwenpaw.agentscope.io/release-notes) をご覧ください。
+
+- [2026-04-12] **CoPaw は正式に QwenPaw へリブランディングしました**。オープンソース開発の次のフェーズへ進むうえでの、重要な一歩です。
 
 新しい名前は、私たちが築いているオープンなエコシステムと、これからも追求していく大きな方向性を、より的確に表しています。
 
@@ -238,12 +243,13 @@ docker pull agentscope/qwenpaw:latest
 docker run -p 127.0.0.1:8088:8088 \
   -v qwenpaw-data:/app/working \
   -v qwenpaw-secrets:/app/working.secret \
+  -v qwenpaw-backups:/app/working.backups \
   agentscope/qwenpaw:latest
 ```
 
 中国のユーザーは阿里雲コンテナレジストリ（ACR）も利用できます: `agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/qwenpaw`（タグは同じ）。
 
-ブラウザで **http://127.0.0.1:8088/** を開くとコンソールが利用できます。設定、メモリ、スキルは `qwenpaw-data` ボリュームに保存されます。モデル設定とAPIキーは `qwenpaw-secrets` ボリュームに保存されます。APIキー（例: `DASHSCOPE_API_KEY`）を渡すには、`docker run` に `-e VAR=value` または `--env-file .env` を追加してください。
+ブラウザで **http://127.0.0.1:8088/** を開くとコンソールが利用できます。設定、メモリ、スキルは `qwenpaw-data` ボリュームに保存されます。モデル設定とAPIキーは `qwenpaw-secrets` ボリュームに保存されます。バックアップアーカイブは `qwenpaw-backups` ボリュームに保存されます。APIキー（例: `DASHSCOPE_API_KEY`）を渡すには、`docker run` に `-e VAR=value` または `--env-file .env` を追加してください。
 
 > **ホストマシン上のOllamaや他のモデルサービスに接続する**
 >
@@ -255,6 +261,7 @@ docker run -p 127.0.0.1:8088:8088 \
 >   --add-host=host.docker.internal:host-gateway \
 >   -v qwenpaw-data:/app/working \
 >   -v qwenpaw-secrets:/app/working.secret \
+>   -v qwenpaw-backups:/app/working.backups \
 >   agentscope/qwenpaw:latest
 > ```
 > その後、QwenPawの **設定 → モデル** で、Base URLを `http://host.docker.internal:<ポート>` に変更してください — 例えば、Ollamaの場合は `http://host.docker.internal:11434`、LM Studioの場合は `http://host.docker.internal:1234/v1` とします。
@@ -264,11 +271,10 @@ docker run -p 127.0.0.1:8088:8088 \
 > docker run --network=host \
 >   -v qwenpaw-data:/app/working \
 >   -v qwenpaw-secrets:/app/working.secret \
+>   -v qwenpaw-backups:/app/working.backups \
 >   agentscope/qwenpaw:latest
 > ```
 > ポートマッピング（`-p`）は不要で、コンテナはホストネットワークを直接共有します。ただし、コンテナの全ポートがホスト上に公開されるため、使用中のポートと競合する可能性があります。
->
-> **ヒント：** `/app/working` のみをマウントし `/app/working.secret` を別途マウントしない場合、エントリポイントスクリプトが自動的にsecretsを `/app/working/.secret` にリダイレクトし、同じボリュームに永続化します。
 
 イメージはゼロからビルドされています。自分でイメージをビルドする場合は、`scripts/README.md` の [Build Docker image](scripts/README.md#build-docker-image) セクションを参照し、レジストリにプッシュしてください。
 
@@ -377,8 +383,10 @@ qwenpaw app    # サービスを起動
 | [モデル](https://qwenpaw.agentscope.io/docs/models)                         | クラウド・ローカル・カスタムプロバイダーの設定       |
 | [チャネル](https://qwenpaw.agentscope.io/docs/channels)                      | DingTalk、Feishu、QQ、Discord、iMessageなど         |
 | [スキル](https://qwenpaw.agentscope.io/docs/skills)                          | 機能の拡張とカスタマイズ                             |
+| [プラグイン](https://qwenpaw.agentscope.io/docs/plugins)                     | プラグインシステム                                   |
 | [MCP](https://qwenpaw.agentscope.io/docs/mcp)                                | MCPクライアントの管理                               |
 | [メモリ](https://qwenpaw.agentscope.io/docs/memory)                          | 長期記憶                              |
+| [記憶進化＆プロアクティブ](https://qwenpaw.agentscope.io/docs/memory-evolving-and-proactive) | エージェントの記憶進化とプロアクティブインタラクション |
 | [コンテキスト](https://qwenpaw.agentscope.io/docs/context)                  | コンテキスト管理メカニズム                          |
 | [魔法コマンド](https://qwenpaw.agentscope.io/docs/commands)                 | AIの応答を待たずに会話状態を制御                     |
 | [ハートビート](https://qwenpaw.agentscope.io/docs/heartbeat)                 | スケジュールされたチェックインとダイジェスト        |
@@ -423,21 +431,28 @@ GitHubでQwenPawにスターを付けて、新しいリリースの通知を即�
 
 ## ロードマップ
 
-| 方向 | 項目 | 状態 |
-| --- | --- | --- |
-| **横展開** | より多くのチャネル、モデル、スキル、MCP など — **コミュニティの貢献歓迎** | 貢献者募集中 |
-| **既存機能の拡張・改善** | 表示の最適化、ダウンロードヒント、Windows パス互換など — **コミュニティの貢献歓迎** | 貢献者募集中 |
-| **コンソール Web UI** | コンソールでより多くの情報と設定を公開 | 進行中 |
-| **マルチエージェント** | Agentic Ralph Loop | 進行中 |
-| **マルチモーダル** | 音声/ビデオ通話とリアルタイム対話 | 進行中 |
-| **大小モデル協調** | マルチモデルルーティング、タスクごとに異なるモデルを使い分け | 進行中 |
-| **メモリシステム** | 経験の蒸留とスキル抽出 | 進行中 |
-| | メモリメカニズムの切り替え | 進行中 |
-| | マルチモーダルメモリの融合 | 計画中 |
-| | コンテキストに応じた能動的配信 | 計画中 |
-| **サンドボックス** | AgentScope Runtime サンドボックスとの深い統合 | 進行中 |
-| **クラウドネイティブ** | AgentScope Runtime との深い統合、クラウド算力・ストレージ・ツールおよびスキルの活用 | 進行中 |
-| **スキルエコシステム** | [AgentScope Skills](https://github.com/agentscope-ai/agentscope-skills) リポジトリの充実、高品質スキルの発見・利用向上 | 計画中 |
+| 方向                     | 項目                                                                                         | 状態         |
+| ------------------------ | -------------------------------------------------------------------------------------------- | ------------ |
+| **横展開**               | より多くのチャネル、モデル、スキル、MCP など — **コミュニティの貢献歓迎**                    | 貢献者募集中 |
+| **既存機能の拡張・改善** | 表示の最適化、ダウンロードヒント、Windows パス互換など — **コミュニティの貢献歓迎**        | 貢献者募集中 |
+| **クライアント体験**     | インストール・アップデート・パッケージングの最適化                                           | 進行中       |
+| **モデル**               | 端末・クラウドモデルのインテリジェント切り替え                                               | 進行中       |
+|                          | OAuth                                                                                        | 計画中       |
+|                          | Response API                                                                                 | 計画中       |
+| **プロアクティブ**       | 定時タスクとハートビートのアップグレード                                                   | 進行中       |
+|                          | 能動的ブリーフィング・カスタムプッシュ                                                     | 進行中       |
+|                          | インサイト：対話とインタラクションからニーズを発掘                                           | 計画中       |
+| **ワークスペース**       | Sandbox 連携のファイル権限制御                                                             | 進行中       |
+|                          | サブディレクトリ分割（設定・本番ファイルなど）                                               | 計画中       |
+| **Coding 能力**          | LSP、専用 Prompt、ワークスペース版管理、実行環境などの配套 infra                             | 計画中       |
+|                          | 軽量ネイティブ API                                                                           | 計画中       |
+|                          | ツール自己進化                                                                               | 計画中       |
+|                          | Claude Code など既存 Agent との互換                                                          | 計画中       |
+| **マルチエージェント**   | グループチャット                                                                             | 計画中       |
+|                          | Subagent                                                                                     | 計画中       |
+|                          | HiClaw エンタープライズ機能                                                                  | 計画中       |
+| **コンテキスト管理**     | コンテキストのインテリジェント圧縮                                                         | 進行中       |
+|                          | ユーザー選択による圧縮（細粒度制御）                                                         | 計画中       |
 
 _状態説明：**進行中** — 積極的に開発中；**計画中** — キューまたは設計段階、貢献も歓迎；**貢献者募集中** — コミュニティの参加を強く推奨。_
 

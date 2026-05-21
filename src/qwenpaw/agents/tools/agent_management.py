@@ -13,6 +13,7 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
 from ...config.utils import read_last_api
+from ...utils.http import trust_env_for_url
 
 
 DEFAULT_AGENT_API_BASE_URL = "http://127.0.0.1:8088"
@@ -65,9 +66,11 @@ def create_agent_api_client(
     default_timeout: float = DEFAULT_AGENT_API_TIMEOUT,
 ) -> httpx.Client:
     """Create an HTTP client targeting the local agent API."""
+    normalized = _normalize_api_base_url(base_url)
     return httpx.Client(
-        base_url=_normalize_api_base_url(base_url),
+        base_url=normalized,
         timeout=default_timeout,
+        trust_env=trust_env_for_url(normalized),
     )
 
 
@@ -191,8 +194,20 @@ def build_agent_chat_request(
     text: str,
     session_id: Optional[str] = None,
     from_agent: Optional[str] = None,
+    root_session_id: Optional[str] = None,
 ) -> tuple[str, Dict[str, Any], bool]:
-    """Build the inter-agent chat payload and resolve the final session ID."""
+    """Build the inter-agent chat payload and resolve the final session ID.
+
+    Args:
+        to_agent: Target agent ID
+        text: Message text
+        session_id: Optional session ID override
+        from_agent: Calling agent ID (for identity prefix)
+        root_session_id: Root session ID for cross-session approval routing
+
+    Returns:
+        Tuple of (final_session_id, request_payload, text_was_prefixed)
+    """
     caller_agent_id = resolve_calling_agent_id(from_agent)
     final_session_id = resolve_agent_session_id(
         caller_agent_id,
@@ -208,12 +223,33 @@ def build_agent_chat_request(
                 "content": [{"type": "text", "text": final_text}],
             },
         ],
+        "request_context": {
+            "root_agent_id": caller_agent_id,
+        },
     }
+
+    # Add root_session_id as top-level field for approval routing
+    if root_session_id:
+        request_payload["root_session_id"] = root_session_id
+
     return final_session_id, request_payload, final_text != text
 
 
-def _request_headers(to_agent: Optional[str]) -> Dict[str, str]:
-    return {"X-Agent-Id": to_agent} if to_agent else {}
+def _request_headers(
+    to_agent: Optional[str],
+) -> Dict[str, str]:
+    """Build HTTP headers for agent chat requests.
+
+    Args:
+        to_agent: Target agent ID
+
+    Returns:
+        Dictionary of HTTP headers
+    """
+    headers = {}
+    if to_agent:
+        headers["X-Agent-Id"] = to_agent
+    return headers
 
 
 def stream_agent_chat(
@@ -272,12 +308,16 @@ def submit_agent_chat_task(
     request_payload: Dict[str, Any],
     to_agent: str,
     timeout: int,
+    task_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Submit an inter-agent chat task for background execution."""
+    payload = dict(request_payload)
+    if task_timeout is not None:
+        payload["timeout"] = task_timeout
     with create_agent_api_client(base_url) as client:
         response = client.post(
             "/agent/process/task",
-            json=request_payload,
+            json=payload,
             headers=_request_headers(to_agent),
             timeout=timeout,
         )
@@ -443,11 +483,22 @@ async def chat_with_agent(
             f"Agent [{normalized_to_agent}] not exists",
         )
 
+    # Get root_session_id from current context for cross-session approval
+    from ...app.agent_context import (
+        get_current_session_id,
+        get_current_root_session_id,
+    )
+
+    caller_session_id = get_current_session_id() or ""
+    caller_root_session = get_current_root_session_id()
+    final_root_session = caller_root_session or caller_session_id
+
     final_session_id, request_payload, _ = build_agent_chat_request(
         normalized_to_agent,
         text,
         session_id=normalized_session_id,
         from_agent=None,
+        root_session_id=final_root_session,
     )
 
     response_data = await asyncio.to_thread(
@@ -469,6 +520,7 @@ async def submit_to_agent(
     to_agent: str,
     text: str,
     session_id: Optional[str] = None,
+    task_timeout: Optional[float] = None,
 ) -> ToolResponse:
     """Submit a background message to another configured agent.
 
@@ -485,6 +537,9 @@ async def submit_to_agent(
         session_id (`str`, optional):
             Existing session ID to continue a previous conversation in the
             background. If not provided, a new session ID is generated.
+        task_timeout (`float`, optional):
+            Task execution timeout in seconds. Overrides the server-side
+            default stream_task_timeout for this specific task.
 
     Returns:
         `ToolResponse`:
@@ -513,18 +568,31 @@ async def submit_to_agent(
             f"Agent [{normalized_to_agent}] not exists",
         )
 
+    # Get root_session_id from current context for cross-session approval
+    from ...app.agent_context import (
+        get_current_session_id,
+        get_current_root_session_id,
+    )
+
+    caller_session_id = get_current_session_id() or ""
+    caller_root_session = get_current_root_session_id()
+    final_root_session = caller_root_session or caller_session_id
+
     final_session_id, request_payload, _ = build_agent_chat_request(
         normalized_to_agent,
         text,
         session_id=normalized_session_id,
         from_agent=None,
+        root_session_id=final_root_session,
     )
+
     result = await asyncio.to_thread(
         submit_agent_chat_task,
         None,
         request_payload,
         normalized_to_agent,
         int(DEFAULT_AGENT_API_TIMEOUT),
+        task_timeout,
     )
     return _tool_text_response(
         format_background_submission_text(result, final_session_id),

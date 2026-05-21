@@ -102,7 +102,13 @@ async function _uploadZip(
   });
 
   if (!response.ok) {
-    throw new Error(await response.text());
+    const text = await response.text();
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      // Format like request.ts so parseErrorDetail() can extract structured fields
+      throw new Error(`${response.status} ${response.statusText} - ${text}`);
+    }
+    throw new Error(text || `Request failed: ${response.status}`);
   }
 
   return await response.json();
@@ -244,7 +250,24 @@ export const skillApi = {
     }),
 
   batchEnableSkills: (skillNames: string[]) =>
-    request<void>("/skills/batch-enable", {
+    request<{
+      results: Record<
+        string,
+        {
+          success?: boolean;
+          reason?: string;
+          detail?: unknown;
+        }
+      >;
+    }>("/skills/batch-enable", {
+      method: "POST",
+      body: JSON.stringify(skillNames),
+    }),
+
+  batchDisableSkills: (skillNames: string[]) =>
+    request<{
+      results: Record<string, { success: boolean; reason?: string }>;
+    }>("/skills/batch-disable", {
       method: "POST",
       body: JSON.stringify(skillNames),
     }),
@@ -325,7 +348,7 @@ export const skillApi = {
   },
 
   importSelectedPoolBuiltins: (payload: {
-    skill_names: string[];
+    imports: Array<{ skill_name: string; language: string }>;
     overwrite_conflicts?: boolean;
   }) =>
     request<{
@@ -334,19 +357,26 @@ export const skillApi = {
       unchanged: string[];
       conflicts: Array<{
         skill_name: string;
+        language?: string;
+        status?: string;
+        source_name?: string;
         source_version_text?: string;
         current_version_text?: string;
         current_source?: string;
+        current_language?: string;
       }>;
     }>("/skills/pool/import-builtin", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
 
-  updatePoolBuiltin: (skillName: string) =>
+  updatePoolBuiltin: (skillName: string, language: string) =>
     request<Record<string, unknown>>(
       `/skills/pool/${encodeURIComponent(skillName)}/update-builtin`,
-      { method: "POST" },
+      {
+        method: "POST",
+        body: JSON.stringify({ language }),
+      },
     ),
 
   deleteSkillPoolSkill: (skillName: string) =>

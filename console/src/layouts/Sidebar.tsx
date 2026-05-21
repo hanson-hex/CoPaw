@@ -6,6 +6,7 @@ import {
   Input,
   Form,
   Tooltip,
+  Badge,
   type MenuProps,
 } from "antd";
 import { useState, useEffect } from "react";
@@ -26,6 +27,7 @@ import {
   SparkModifyLine,
   SparkBrowseLine,
   SparkMcpMcpLine,
+  SparkScanLine,
   SparkToolLine,
   SparkDataLine,
   SparkMicLine,
@@ -35,9 +37,15 @@ import {
   SparkMenuExpandLine,
   SparkMenuFoldLine,
   SparkOtherLine,
+  SparkBarChartLine,
+  SparkDebugLine,
+  SparkSaveLine,
+  SparkEmailLine,
 } from "@agentscope-ai/icons";
+import { Package } from "lucide-react";
 import { clearAuthToken } from "../api/config";
 import { authApi } from "../api/modules/auth";
+import api from "../api";
 import { usePlugins } from "../plugins/PluginContext";
 import styles from "./index.module.less";
 import { useTheme } from "../contexts/ThemeContext";
@@ -46,6 +54,16 @@ import { KEY_TO_PATH, DEFAULT_OPEN_KEYS } from "./constants";
 // ── Layout ────────────────────────────────────────────────────────────────
 
 const { Sider } = Layout;
+const MOBILE_SIDEBAR_QUERY = "(max-width: 768px)";
+
+function isMobileSidebarViewport() {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia(MOBILE_SIDEBAR_QUERY).matches
+  );
+}
+const INBOX_BADGE_POLLING_MS = 6000;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -66,6 +84,8 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountForm] = Form.useForm();
   const [collapsed, setCollapsed] = useState(false);
+  const [isMobile, setIsMobile] = useState(isMobileSidebarViewport);
+  const [hasInboxUnread, setHasInboxUnread] = useState(false);
 
   // ── Effects ──────────────────────────────────────────────────────────────
 
@@ -76,6 +96,59 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    ) {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia(MOBILE_SIDEBAR_QUERY);
+    const syncMobileSidebar = () => {
+      setIsMobile(mediaQuery.matches);
+      if (mediaQuery.matches) {
+        setCollapsed(true);
+      }
+    };
+
+    syncMobileSidebar();
+    mediaQuery.addEventListener("change", syncMobileSidebar);
+
+    return () => {
+      mediaQuery.removeEventListener("change", syncMobileSidebar);
+    };
+  }, []);
+  useEffect(() => {
+    const loadUnreadState = async () => {
+      try {
+        const [inboxRes, pushRes] = await Promise.all([
+          api.getInboxEvents({
+            unread_only: true,
+            limit: 1,
+          }),
+          api.getPushMessages(),
+        ]);
+        const hasUnreadEvents = (inboxRes?.events?.length || 0) > 0;
+        const hasPendingApprovals =
+          (pushRes?.pending_approvals?.length || 0) > 0;
+        setHasInboxUnread(hasUnreadEvents || hasPendingApprovals);
+      } catch {
+        // Keep previous state when polling fails.
+      }
+    };
+    void loadUnreadState();
+    const timer = window.setInterval(() => {
+      void loadUnreadState();
+    }, INBOX_BADGE_POLLING_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const inboxLabel = collapsed ? null : (
+    <Badge dot={hasInboxUnread} color="rgba(255, 157, 77, 1)" offset={[5, 7]}>
+      <span>{t("nav.inbox")}</span>
+    </Badge>
+  );
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleUpdateProfile = async (values: {
@@ -141,6 +214,29 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.chat"),
     },
     {
+      key: "inbox",
+      icon: (
+        <span style={{ position: "relative", display: "inline-flex" }}>
+          <SparkEmailLine size={18} />
+          {hasInboxUnread && (
+            <span
+              style={{
+                position: "absolute",
+                top: -1,
+                right: -3,
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: "rgba(255, 157, 77, 1)",
+              }}
+            />
+          )}
+        </span>
+      ),
+      path: "/inbox",
+      label: t("nav.inbox"),
+    },
+    {
       key: "channels",
       icon: <SparkWifiLine size={18} />,
       path: "/channels",
@@ -195,10 +291,22 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.mcp"),
     },
     {
+      key: "acp",
+      icon: <SparkScanLine size={18} />,
+      path: "/acp",
+      label: t("nav.acp"),
+    },
+    {
       key: "agent-config",
       icon: <SparkModifyLine size={18} />,
       path: "/agent-config",
       label: t("nav.agentConfig"),
+    },
+    {
+      key: "agent-stats",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/agent-stats",
+      label: t("nav.agentStats"),
     },
     {
       key: "agents",
@@ -231,6 +339,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.tokenUsage"),
     },
     {
+      key: "backups",
+      icon: <SparkSaveLine size={18} />,
+      path: "/backups",
+      label: t("nav.backups"),
+    },
+    {
       key: "voice-transcription",
       icon: <SparkMicLine size={18} />,
       path: "/voice-transcription",
@@ -238,9 +352,15 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     },
     {
       key: "debug",
-      icon: <SparkOtherLine size={18} />,
+      icon: <SparkDebugLine size={18} />,
       path: "/debug",
       label: t("nav.debug", "Debug"),
+    },
+    {
+      key: "plugin-manager",
+      icon: <Package size={18} />,
+      path: "/plugin-manager",
+      label: t("nav.pluginManager", "Plugin Manager"),
     },
     // Append plugin nav items dynamically
     ...pluginRoutes.map((route) => ({
@@ -255,9 +375,9 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
 
   const agentMenuItems: MenuProps["items"] = [
     {
-      key: "chat",
-      label: collapsed ? null : t("nav.chat"),
-      icon: <SparkChatTabFill size={16} />,
+      key: "inbox",
+      label: inboxLabel,
+      icon: <SparkEmailLine size={16} />,
     },
     {
       key: "control-group",
@@ -310,9 +430,19 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkMcpMcpLine size={16} />,
         },
         {
+          key: "acp",
+          label: collapsed ? null : t("nav.acp"),
+          icon: <SparkScanLine size={16} />,
+        },
+        {
           key: "agent-config",
           label: collapsed ? null : t("nav.agentConfig"),
           icon: <SparkModifyLine size={16} />,
+        },
+        {
+          key: "agent-stats",
+          label: collapsed ? null : t("nav.agentStats"),
+          icon: <SparkBarChartLine size={16} />,
         },
       ],
     },
@@ -356,6 +486,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkDataLine size={16} />,
         },
         {
+          key: "backups",
+          label: collapsed ? null : t("nav.backups"),
+          icon: <SparkSaveLine size={16} />,
+        },
+        {
           key: "voice-transcription",
           label: collapsed ? null : t("nav.voiceTranscription"),
           icon: <SparkMicLine size={16} />,
@@ -363,7 +498,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
         {
           key: "debug",
           label: collapsed ? null : t("nav.debug", "Debug"),
-          icon: <SparkOtherLine size={16} />,
+          icon: <SparkDebugLine size={16} />,
+        },
+        {
+          key: "plugin-manager",
+          label: collapsed ? null : t("nav.pluginManager", "Plugin Manager"),
+          icon: <Package size={16} />,
         },
       ],
     },
@@ -384,9 +524,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
 
   // ── Render ────────────────────────────────────────────────────────────────
 
+  const siderWidth = collapsed ? (isMobile ? 56 : 72) : 240;
+
   return (
     <Sider
-      width={collapsed ? 72 : 240}
+      width={siderWidth}
       className={`${styles.sider}${
         collapsed ? ` ${styles.siderCollapsed}` : ""
       }${isDark ? ` ${styles.siderDark}` : ""}`}
@@ -423,6 +565,18 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           <div className={styles.agentScopedSection}>
             <div className={styles.agentSelectorContainer}>
               <AgentSelector collapsed={collapsed} />
+              {/* Chat entry — sticky together with agent selector */}
+              <button
+                className={`${styles.stickyChatButton}${
+                  selectedKey === "chat"
+                    ? ` ${styles.stickyChatButtonActive}`
+                    : ""
+                }`}
+                onClick={() => navigate("/chat")}
+              >
+                <SparkChatTabFill size={16} />
+                <span>{t("nav.chat")}</span>
+              </button>
             </div>
             <Menu
               mode="inline"
